@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pokémon Card Collection Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-4 sm:p-8 font-sans">
+  <div class="max-w-6xl mx-auto">
+	
+	<!-- Top Bar -->
+	<header class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+	  <div>
+		<h1 class="text-3xl font-black tracking-tight text-amber-400">⚡ Pokémon Card Vault</h1>
+		<p class="text-slate-400 text-sm mt-0.5">Live two-way sync with Google Sheets</p>
+	  </div>
+
+	  <!-- Set Progress -->
+	  <div class="w-full sm:w-64 bg-slate-900 border border-slate-800 p-3 rounded-xl">
+		<div class="flex justify-between text-xs font-semibold mb-1.5">
+		  <span id="progress-label" class="text-slate-400">Set Completion</span>
+		  <span id="progress-text" class="text-amber-400 font-mono">0/0 (0%)</span>
+		</div>
+		<div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+		  <div id="progress-bar" class="bg-amber-400 h-full transition-all duration-300" style="width: 0%"></div>
+		</div>
+	  </div>
+	</header>
+
+	<!-- Set Navigation Tabs -->
+	<div id="set-tabs" class="flex gap-2 overflow-x-auto pb-3 mb-6 border-b border-slate-800 scrollbar-none">
+	  <span class="text-xs text-slate-500 py-1.5">Loading sets...</span>
+	</div>
+
+	<!-- Controls: Search & Variant Filter -->
+	<div class="flex flex-col sm:flex-row gap-3 mb-6">
+	  <input 
+		id="search" 
+		type="text" 
+		placeholder="Search card name or number (e.g. 001/086)..." 
+		class="flex-1 bg-slate-900 border border-slate-800 px-4 py-2 rounded-lg text-sm focus:outline-none focus:border-amber-400 placeholder:text-slate-500"
+	  />
+	  <select id="owned-filter" class="bg-slate-900 border border-slate-800 px-3 py-2 rounded-lg text-sm focus:outline-none focus:border-amber-400 text-slate-300">
+		<option value="all">All Status</option>
+		<option value="owned">Owned Only</option>
+		<option value="missing">Missing Only</option>
+	  </select>
+	  <select id="foil-filter" class="bg-slate-900 border border-slate-800 px-3 py-2 rounded-lg text-sm focus:outline-none focus:border-amber-400 text-slate-300">
+		<option value="all">All Variants</option>
+		<option value="Standard">Standard</option>
+		<option value="Reverse Holo">Reverse Holo</option>
+		<option value="Holo">Holo</option>
+	  </select>
+	</div>
+
+	<!-- Card Grid -->
+	<div id="card-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5">
+	  <div class="col-span-full py-16 text-center text-slate-500 text-sm">Connecting to Google Sheets...</div>
+	</div>
+  </div>
+
+  <script>
+	const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
+
+	let allCards = [];
+	let sets = [];
+	let activeSet = "";
+
+	async function init() {
+	  try {
+		const res = await fetch(SCRIPT_URL);
+		const data = await res.json();
+		if (data.status === "success") {
+		  allCards = data.cards;
+		  sets = data.sets;
+		  activeSet = sets[0] || "";
+		  renderTabs();
+		  renderCards();
+		} else {
+		  showError(data.message);
+		}
+	  } catch (err) {
+		showError(err.message);
+	  }
+	}
+
+	function showError(msg) {
+	  document.getElementById("card-grid").innerHTML = 
+		`<div class="col-span-full py-12 text-center text-rose-400 text-sm">Error: ${msg}</div>`;
+	}
+
+	function renderTabs() {
+	  const container = document.getElementById("set-tabs");
+	  container.innerHTML = sets.map(setName => {
+		const isActive = setName === activeSet;
+		return `
+		  <button 
+			onclick="switchSet('${setName}')"
+			class="px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+			  isActive 
+				? 'bg-amber-400 text-slate-950 shadow' 
+				: 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+			}">
+			${setName}
+		  </button>
+		`;
+	  }).join('');
+	}
+
+	function switchSet(setName) {
+	  activeSet = setName;
+	  renderTabs();
+	  renderCards();
+	}
+
+	async function toggleCard(set, rowIndex, currentStatus) {
+	  const target = allCards.find(c => c.set === set && c.rowIndex === rowIndex);
+	  if (!target) return;
+
+	  const nextStatus = !currentStatus;
+	  target.owned = nextStatus; // Optimistic update
+	  renderCards();
+
+	  try {
+		await fetch(SCRIPT_URL, {
+		  method: "POST",
+		  headers: { "Content-Type": "text/plain;charset=utf-8" },
+		  body: JSON.stringify({ set, rowIndex, owned: nextStatus })
+		});
+	  } catch (err) {
+		console.error("Sync failed:", err);
+		target.owned = currentStatus; // Revert on network error
+		renderCards();
+	  }
+	}
+
+	function renderCards() {
+	  const query = document.getElementById("search").value.toLowerCase();
+	  const ownedFilter = document.getElementById("owned-filter").value;
+	  const foilFilter = document.getElementById("foil-filter").value;
+
+	  const currentSetCards = allCards.filter(c => c.set === activeSet);
+
+	  const filtered = currentSetCards.filter(c => {
+		const matchesQuery = c.name.toLowerCase().includes(query) || c.cardNumber.toLowerCase().includes(query);
+		const matchesOwned = ownedFilter === "all" ? true : ownedFilter === "owned" ? c.owned : !c.owned;
+		const matchesFoil = foilFilter === "all" ? true : c.foil.toLowerCase() === foilFilter.toLowerCase();
+		return matchesQuery && matchesOwned && matchesFoil;
+	  });
+
+	  // Update progress
+	  const ownedCount = currentSetCards.filter(c => c.owned).length;
+	  const totalCount = currentSetCards.length;
+	  const pct = totalCount > 0 ? Math.round((ownedCount / totalCount) * 100) : 0;
+	  document.getElementById("progress-bar").style.width = `${pct}%`;
+	  document.getElementById("progress-text").textContent = `${ownedCount}/${totalCount} (${pct}%)`;
+
+	  const grid = document.getElementById("card-grid");
+	  if (filtered.length === 0) {
+		grid.innerHTML = `<div class="col-span-full py-16 text-center text-slate-500 text-sm">No cards match the filters in this set.</div>`;
+		return;
+	  }
+
+	  grid.innerHTML = filtered.map(card => {
+		const foilStyle = 
+		  card.foil === "Reverse Holo" ? "bg-sky-500/10 text-sky-400 border-sky-500/20" :
+		  card.foil === "Holo" ? "bg-purple-500/10 text-purple-400 border-purple-500/20" :
+		  "bg-slate-800 text-slate-400 border-slate-700";
+
+		return `
+		  <div class="relative bg-slate-900 border ${card.owned ? 'border-amber-400/50' : 'border-slate-800'} rounded-xl p-3 flex flex-col justify-between transition hover:border-slate-700">
+			<div>
+			  <div class="flex items-center justify-between gap-1 mb-2">
+				<span class="text-[11px] font-mono text-slate-400">${card.cardNumber}</span>
+				<span class="text-[10px] font-medium px-2 py-0.5 rounded border ${foilStyle}">${card.foil}</span>
+			  </div>
+			  <h2 class="text-sm font-bold text-white truncate mb-0.5">${card.name}</h2>
+			  <div class="text-[11px] text-slate-500 mb-3">${card.rarity}</div>
+			</div>
+
+			<button 
+			  onclick="toggleCard('${card.set}', ${card.rowIndex}, ${card.owned})"
+			  class="w-full py-1.5 rounded-lg text-xs font-semibold transition ${
+				card.owned 
+				  ? 'bg-amber-400 text-slate-950 hover:bg-amber-300' 
+				  : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+			  }">
+			  ${card.owned ? '✓ Owned' : '+ Add'}
+			</button>
+		  </div>
+		`;
+	  }).join('');
+	}
+
+	document.getElementById("search").addEventListener("input", renderCards);
+	document.getElementById("owned-filter").addEventListener("change", renderCards);
+	document.getElementById("foil-filter").addEventListener("change", renderCards);
+
+	init();
+  </script>
+</body>
+</html>
