@@ -113,72 +113,118 @@
 	  renderTabs();
 	  renderCards();
 	}
-
-	async function toggleCard(set, rowIndex, currentStatus) {
-	  const target = allCards.find(c => c.set === set && c.rowIndex === rowIndex);
-	  if (!target) return;
-
-	  const nextStatus = !currentStatus;
-	  target.owned = nextStatus; // Optimistic update
-	  renderCards();
-
-	  try {
-		await fetch(SCRIPT_URL, {
-		  method: "POST",
-		  headers: { "Content-Type": "text/plain;charset=utf-8" },
-		  body: JSON.stringify({ set, rowIndex, owned: nextStatus })
+	
+	// ==========================================
+	// 1. ADD THE IMAGE HELPER FUNCTION RIGHT HERE
+	// ==========================================
+	function getCardImageSrc(card) {
+	  // Prioritize remote API image if available
+	  // Debug output in browser console
+		console.log("Checking Card:", {
+		  setName: card.set,
+		  cardNum: card.cardNumber,
+		  foil: card.foil
 		});
-	  } catch (err) {
-		console.error("Sync failed:", err);
-		target.owned = currentStatus; // Revert on network error
-		renderCards();
-	  }
+	  if (card.image_url) return card.image_url;
+	
+	  const setFolders = {
+		"Journey Together" :"CardImages/journey-together-images",
+		"Destined Rivals" :"CardImages/destined-rivals-images",
+		"Perfect Order" :"CardImages/perfect-order-images",
+		"Pitch Black" :"CardImages/pitch-black-images",
+		"Surging Sparks" :"CardImages/surging-sparks-images",
+		"Chaos Rising": "CardImages/chaos-rising-images"
+	  };
+	
+	  const folder = setFolders[card.set];
+	  if (!folder || !card.cardNumber) return "";
+	
+	  // Converts "001/086" -> "1"
+	  const rawNum = card.cardNumber.split("/")[0].trim();
+	  const cleanNum = rawNum.replace(/^0+/, "") || "0";
+	
+	  // Normalizes "Reverse Holo" -> "reverse_holo", "Standard" -> "standard"
+	  const foilNorm = (card.foil || "standard")
+		.trim()
+		.toLowerCase()
+		.replace(/\s+/g, "_");
+	
+	  return `${folder}/${cleanNum}_${foilNorm}.png`;
 	}
-
+	
+	// ==========================================
+	// 2. UPDATE renderCards() TO USE IT
+	// ==========================================
 	function renderCards() {
 	  const query = document.getElementById("search").value.toLowerCase();
 	  const ownedFilter = document.getElementById("owned-filter").value;
 	  const foilFilter = document.getElementById("foil-filter").value;
-
+	
 	  const currentSetCards = allCards.filter(c => c.set === activeSet);
-
+	
 	  const filtered = currentSetCards.filter(c => {
 		const matchesQuery = c.name.toLowerCase().includes(query) || c.cardNumber.toLowerCase().includes(query);
 		const matchesOwned = ownedFilter === "all" ? true : ownedFilter === "owned" ? c.owned : !c.owned;
 		const matchesFoil = foilFilter === "all" ? true : c.foil.toLowerCase() === foilFilter.toLowerCase();
 		return matchesQuery && matchesOwned && matchesFoil;
 	  });
-
+	
 	  // Update progress
 	  const ownedCount = currentSetCards.filter(c => c.owned).length;
 	  const totalCount = currentSetCards.length;
 	  const pct = totalCount > 0 ? Math.round((ownedCount / totalCount) * 100) : 0;
 	  document.getElementById("progress-bar").style.width = `${pct}%`;
 	  document.getElementById("progress-text").textContent = `${ownedCount}/${totalCount} (${pct}%)`;
-
+	
 	  const grid = document.getElementById("card-grid");
 	  if (filtered.length === 0) {
 		grid.innerHTML = `<div class="col-span-full py-16 text-center text-slate-500 text-sm">No cards match the filters in this set.</div>`;
 		return;
 	  }
-
+	
 	  grid.innerHTML = filtered.map(card => {
 		const foilStyle = 
 		  card.foil === "Reverse Holo" ? "bg-sky-500/10 text-sky-400 border-sky-500/20" :
 		  card.foil === "Holo" ? "bg-purple-500/10 text-purple-400 border-purple-500/20" :
 		  "bg-slate-800 text-slate-400 border-slate-700";
-
+	
+		// Call the image helper here:
+		const imgSrc = getCardImageSrc(card);
+		const priceDisplay = card.market_price ? `$${Number(card.market_price).toFixed(2)}` : "—";
+	
 		return `
 		  <div class="relative bg-slate-900 border ${card.owned ? 'border-amber-400/50' : 'border-slate-800'} rounded-xl p-3 flex flex-col justify-between transition hover:border-slate-700">
+			
+			<!-- Card Image -->
+			<div class="aspect-[3/4] bg-slate-950 rounded-lg overflow-hidden flex items-center justify-center mb-2.5 relative border border-slate-800/80">
+			 ${imgSrc 
+				 ? `<img 
+					 src="${imgSrc}" 
+					 alt="${card.name}" 
+					 class="w-full h-full object-contain ${!card.owned ? 'opacity-35 grayscale contrast-75' : 'opacity-100'}"
+					 onload="console.log('Image successfully rendered:', this.src)"
+					 onerror="console.error('File not found at path:', this.src);"
+				   />`
+				 : `<div class="text-[11px] text-amber-500/80 font-mono text-center p-2 leading-tight">
+					 <span>No image path</span><br>
+					 <span class="text-slate-400">${card.name}</span><br>
+					 <span class="text-slate-500 text-[10px]">[Set: "${card.set}"]</span>
+				   </div>`
+			   }
+			</div>
+	
 			<div>
-			  <div class="flex items-center justify-between gap-1 mb-2">
+			  <div class="flex items-center justify-between gap-1 mb-1.5">
 				<span class="text-[11px] font-mono text-slate-400">${card.cardNumber}</span>
 				<span class="text-[10px] font-medium px-2 py-0.5 rounded border ${foilStyle}">${card.foil}</span>
 			  </div>
 			  <h2 class="text-sm font-bold text-white truncate mb-0.5">${card.name}</h2>
-			  <div class="text-[11px] text-slate-500 mb-3">${card.rarity}</div>
+			  <div class="flex items-center justify-between text-[11px] text-slate-500 mb-3">
+				<span>${card.rarity}</span>
+				<span class="text-emerald-400 font-medium">${priceDisplay}</span>
+			  </div>
 			</div>
-
+	
 			<button 
 			  onclick="toggleCard('${card.set}', ${card.rowIndex}, ${card.owned})"
 			  class="w-full py-1.5 rounded-lg text-xs font-semibold transition ${
