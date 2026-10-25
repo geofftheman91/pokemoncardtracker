@@ -16,14 +16,27 @@
 		<p class="text-slate-400 text-sm mt-0.5">Live two-way sync with Google Sheets</p>
 	  </div>
 
-	  <!-- Set Progress -->
-	  <div class="w-full sm:w-64 bg-slate-900 border border-slate-800 p-3 rounded-xl">
-		<div class="flex justify-between text-xs font-semibold mb-1.5">
-		  <span id="progress-label" class="text-slate-400">Set Completion</span>
-		  <span id="progress-text" class="text-amber-400 font-mono">0/0 (0%)</span>
+	  <!-- Set Progress & Live Portfolio Valuation -->
+	  <div class="w-full sm:w-80 bg-slate-900 border border-slate-800 p-3.5 rounded-xl flex flex-col gap-2.5">
+		<div>
+		  <div class="flex justify-between text-xs font-semibold mb-1.5">
+			<span id="progress-label" class="text-slate-400">Set Completion</span>
+			<span id="progress-text" class="text-amber-400 font-mono">0/0 (0%)</span>
+		  </div>
+		  <div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+			<div id="progress-bar" class="bg-amber-400 h-full transition-all duration-300" style="width: 0%"></div>
+		  </div>
 		</div>
-		<div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
-		  <div id="progress-bar" class="bg-amber-400 h-full transition-all duration-300" style="width: 0%"></div>
+
+		<div class="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs">
+		  <div>
+			<span class="text-slate-500 block text-[10px] uppercase tracking-wider font-semibold">Your Value</span>
+			<span id="portfolio-owned-val" class="text-emerald-400 font-bold font-mono text-sm">$0.00</span>
+		  </div>
+		  <div class="text-right">
+			<span class="text-slate-500 block text-[10px] uppercase tracking-wider font-semibold">Master Set Value</span>
+			<span id="portfolio-total-val" class="text-slate-400 font-semibold font-mono text-sm">$0.00</span>
+		  </div>
 		</div>
 	  </div>
 	</header>
@@ -64,8 +77,8 @@
 	// ==========================================
 	// 1. CONFIGURATION & STATE
 	// ==========================================
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";	
-	// Set API Codes for direct TCGdex fetching
+	const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
+
 	const SET_CODES = {
 	  "Journey Together": "sv9",
 	  "Surging Sparks": "sv8",
@@ -81,7 +94,6 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	const CARDS_PER_PAGE = 40;
 	let currentPage = 1;
 
-	// Cache to prevent duplicate price API calls per set
 	const priceCache = {};
 
 	// ==========================================
@@ -121,7 +133,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		console.log("Sheet update response:", result);
 	  } catch (err) {
 		console.error("Sync failed:", err);
-		target.owned = currentStatus; // Revert if request fails
+		target.owned = currentStatus; // Revert UI if sync fails
 		renderCards();
 	  }
 	}
@@ -135,34 +147,64 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	  renderTabs();
 	  renderCards(); // Fast initial render with cards & local images
 
-	  // Fetch prices directly in browser in background
+	  // Fetch prices directly in browser
 	  await loadPricesForSet(setName);
 	}
 
 	async function loadPricesForSet(setName) {
-	  const setCode = SET_CODES[setName];
-	  if (!setCode) return;
-
 	  let setPriceMap = priceCache[setName];
 
 	  if (!setPriceMap) {
 		try {
-		  console.log(`[Price API] Fetching pricing for set: ${setName} (${setCode})`);
-		  const res = await fetch(`https://api.tcgdex.net/v2/en/sets/${setCode}`);
-		  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		  const data = await res.json();
+		  console.log(`[Price API] Looking up prices for: "${setName}"...`);
 
-		  setPriceMap = {};
-		  if (data && data.cards) {
-			data.cards.forEach(card => {
-			  // Normalize card number: "001" -> "1"
-			  const cleanId = String(card.localId || card.id).replace(/^0+/, "");
-			  setPriceMap[cleanId] = card;
-			});
+		  // 1. Direct code lookup
+		  const setCode = SET_CODES[setName];
+		  let data = null;
+
+		  if (setCode) {
+			const res = await fetch(`https://api.tcgdex.net/v2/en/sets/${setCode}`);
+			if (res.ok) {
+			  data = await res.json();
+			}
 		  }
+
+		  // 2. Fallback search by set name if ID fails
+		  if (!data || !data.cards) {
+			console.log(`[Price API] Set code search missed. Searching by name: "${setName}"`);
+			const allSetsRes = await fetch("https://api.tcgdex.net/v2/en/sets");
+			if (allSetsRes.ok) {
+			  const allSets = await allSetsRes.json();
+			  const matchedSet = allSets.find(s => 
+				s.name.toLowerCase().includes(setName.toLowerCase()) || 
+				setName.toLowerCase().includes(s.name.toLowerCase())
+			  );
+
+			  if (matchedSet) {
+				console.log(`[Price API] Matched "${setName}" to ID "${matchedSet.id}"`);
+				const setDetailRes = await fetch(`https://api.tcgdex.net/v2/en/sets/${matchedSet.id}`);
+				data = await setDetailRes.json();
+			  }
+			}
+		  }
+
+		  if (!data || !data.cards) {
+			console.warn(`[Price API] No card data found on TCGdex for: "${setName}"`);
+			return;
+		  }
+
+		  // Index cards by card number
+		  setPriceMap = {};
+		  data.cards.forEach(card => {
+			const cleanId = String(card.localId || card.id).replace(/^0+/, "");
+			setPriceMap[cleanId] = card;
+		  });
+
 		  priceCache[setName] = setPriceMap;
+		  console.log(`[Price API] Cached ${Object.keys(setPriceMap).length} cards for "${setName}"`);
+
 		} catch (err) {
-		  console.warn(`[Price API] Could not fetch pricing for ${setName}:`, err);
+		  console.error(`[Price API Error] Failed to load prices for "${setName}":`, err);
 		  return;
 		}
 	  }
@@ -170,7 +212,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	  // Match and apply market prices to cards in active set
 	  let pricesUpdated = false;
 	  allCards.forEach(card => {
-		if (card.set === setName && !card.market_price) {
+		if (card.set === setName && (card.market_price === null || card.market_price === undefined)) {
 		  const rawNum = String(card.cardNumber).split("/")[0].trim();
 		  const cleanNum = rawNum.replace(/^0+/, "") || "0";
 		  const apiCard = setPriceMap[cleanNum];
@@ -180,11 +222,11 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 			const foil = (card.foil || "").toLowerCase();
 
 			let price = null;
-			if (foil.includes("reverse") && tcg.reverse && tcg.reverse.marketPrice) {
+			if (foil.includes("reverse") && tcg.reverse?.marketPrice) {
 			  price = tcg.reverse.marketPrice;
-			} else if (foil.includes("holo") && tcg.holo && tcg.holo.marketPrice) {
+			} else if (foil.includes("holo") && tcg.holo?.marketPrice) {
 			  price = tcg.holo.marketPrice;
-			} else if (tcg.normal && tcg.normal.marketPrice) {
+			} else if (tcg.normal?.marketPrice) {
 			  price = tcg.normal.marketPrice;
 			} else {
 			  price = tcg.normal?.marketPrice || tcg.reverse?.marketPrice || tcg.holo?.marketPrice || null;
@@ -198,7 +240,6 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		}
 	  });
 
-	  // Re-render once prices are matched
 	  if (pricesUpdated && activeSet === setName) {
 		renderCards();
 	  }
@@ -253,7 +294,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	}
 
 	// ==========================================
-	// 5. CARD RENDERING
+	// 5. CARD RENDERING & VALUATION
 	// ==========================================
 	function renderCards() {
 	  const query = document.getElementById("search").value.toLowerCase();
@@ -269,12 +310,27 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		return matchesQuery && matchesOwned && matchesFoil;
 	  });
 
-	  // Update Header Progress Bar
-	  const ownedCount = currentSetCards.filter(c => c.owned).length;
+	  // Update Completion Count
+	  const ownedCards = currentSetCards.filter(c => c.owned);
+	  const ownedCount = ownedCards.length;
 	  const totalCount = currentSetCards.length;
 	  const pct = totalCount > 0 ? Math.round((ownedCount / totalCount) * 100) : 0;
 	  document.getElementById("progress-bar").style.width = `${pct}%`;
 	  document.getElementById("progress-text").textContent = `${ownedCount}/${totalCount} (${pct}%)`;
+
+	  // Update Live Portfolio Values
+	  const ownedValue = ownedCards.reduce((sum, c) => sum + (Number(c.market_price) || 0), 0);
+	  const totalSetValue = currentSetCards.reduce((sum, c) => sum + (Number(c.market_price) || 0), 0);
+
+	  const ownedValEl = document.getElementById("portfolio-owned-val");
+	  const totalValEl = document.getElementById("portfolio-total-val");
+
+	  if (ownedValEl) {
+		ownedValEl.textContent = `$${ownedValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	  }
+	  if (totalValEl) {
+		totalValEl.textContent = `$${totalSetValue.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+	  }
 
 	  const grid = document.getElementById("card-grid");
 	  if (filtered.length === 0) {
@@ -400,7 +456,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		  renderTabs();
 		  renderCards();
 
-		  // Fetch initial prices for the default selected set
+		  // Fetch prices immediately for the default initial set
 		  if (activeSet) {
 			loadPricesForSet(activeSet);
 		  }
