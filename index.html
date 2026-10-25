@@ -64,16 +64,17 @@
 	// ==========================================
 	// 1. CONFIGURATION & STATE
 	// ==========================================
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";	let allCards = [];
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
+	let allCards = [];
 	let sets = [];
 	let activeSet = "";
 	const CARDS_PER_PAGE = 40;
 	let currentPage = 1;
 
 	// ==========================================
-	// 2. GLOBAL TOGGLE FUNCTION (EXPOSED TO WINDOW)
+	// 2. TOGGLE FUNCTION
 	// ==========================================
-	window.toggleCard = async function(set, rowIndex, currentStatus) {
+	async function toggleCard(set, rowIndex, currentStatus) {
 	  console.log(`[Toggle] Set: "${set}", Row: ${rowIndex}, Current: ${currentStatus}`);
 
 	  // Locate card in local state using loose number comparison
@@ -85,7 +86,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 
 	  const nextStatus = !currentStatus;
 
-	  // Optimistic UI Update (immediate feedback on screen)
+	  // Optimistic UI update
 	  target.owned = nextStatus;
 	  renderCards();
 
@@ -108,20 +109,20 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		console.log("Sheet update response:", result);
 	  } catch (err) {
 		console.error("Sync failed:", err);
-		target.owned = currentStatus; // Revert on failure
+		target.owned = currentStatus; // Revert if call fails
 		renderCards();
 	  }
-	};
+	}
 
 	// ==========================================
 	// 3. SET SWITCHING & TABS
 	// ==========================================
-	window.switchSet = function(setName) {
+	function switchSet(setName) {
 	  activeSet = setName;
 	  currentPage = 1;
 	  renderTabs();
 	  renderCards();
-	};
+	}
 
 	function renderTabs() {
 	  const container = document.getElementById("set-tabs");
@@ -130,8 +131,8 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		return `
 		  <button 
 			type="button"
-			onclick="window.switchSet('${setName.replace(/'/g, "\\'")}')"
-			class="px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+			data-set="${encodeURIComponent(setName)}"
+			class="set-tab-btn px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
 			  isActive 
 				? 'bg-amber-400 text-slate-950 shadow' 
 				: 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
@@ -201,7 +202,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		return;
 	  }
 
-	  // Paginate to keep rendering fast
+	  // Paginate to prevent DOM and decode slowdowns
 	  const visibleCards = filtered.slice(0, currentPage * CARDS_PER_PAGE);
 
 	  const cardMarkup = visibleCards.map(card => {
@@ -225,7 +226,9 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 					loading="lazy" 
 					decoding="async"
 					class="w-full h-full object-contain transition-opacity duration-200 ${!card.owned ? 'opacity-35 grayscale contrast-75' : 'opacity-100'}"
-				  />`
+					onerror="this.style.display='none'; this.nextElementSibling.classList.remove('hidden');"
+				  />
+				  <div class="hidden text-xs text-slate-500 font-mono text-center p-2">${card.name}<br>${card.cardNumber}</div>`
 				: `<div class="text-xs text-slate-500 font-mono text-center p-2">${card.name}<br>${card.cardNumber}</div>`
 			  }
 			</div>
@@ -242,11 +245,13 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 			  </div>
 			</div>
 
-			<!-- Global window.toggleCard call -->
+			<!-- Card Toggle Button with Safe Data Attributes -->
 			<button 
 			  type="button"
-			  onclick="window.toggleCard('${card.set.replace(/'/g, "\\'")}', ${card.rowIndex}, ${card.owned})"
-			  class="w-full py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer select-none ${
+			  data-set="${encodeURIComponent(card.set)}"
+			  data-row="${card.rowIndex}"
+			  data-owned="${card.owned}"
+			  class="toggle-card-btn w-full py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer select-none ${
 				card.owned 
 				  ? 'bg-amber-400 text-slate-950 hover:bg-amber-300' 
 				  : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
@@ -260,7 +265,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	  const loadMoreButton = filtered.length > visibleCards.length 
 		? `
 		  <div class="col-span-full py-6 flex justify-center">
-			<button id="load-more-btn" class="px-6 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition">
+			<button id="load-more-btn" type="button" class="px-6 py-2.5 bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-200 text-xs font-semibold rounded-xl transition cursor-pointer">
 			  Load More Cards (${visibleCards.length} of ${filtered.length})
 			</button>
 		  </div>
@@ -268,18 +273,41 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		: '';
 
 	  grid.innerHTML = cardMarkup + loadMoreButton;
-
-	  const btn = document.getElementById("load-more-btn");
-	  if (btn) {
-		btn.onclick = () => {
-		  currentPage++;
-		  renderCards();
-		};
-	  }
 	}
 
 	// ==========================================
-	// 6. INITIALIZATION & LISTENERS
+	// 6. EVENT DELEGATION (ROBUST CLICK HANDLING)
+	// ==========================================
+	document.getElementById("card-grid").addEventListener("click", (e) => {
+	  // Handle 'Load More' click
+	  const loadMore = e.target.closest("#load-more-btn");
+	  if (loadMore) {
+		currentPage++;
+		renderCards();
+		return;
+	  }
+
+	  // Handle 'Toggle Owned' click
+	  const btn = e.target.closest(".toggle-card-btn");
+	  if (!btn) return;
+
+	  const set = decodeURIComponent(btn.dataset.set);
+	  const rowIndex = Number(btn.dataset.row);
+	  const isOwned = btn.dataset.owned === "true";
+
+	  toggleCard(set, rowIndex, isOwned);
+	});
+
+	// Handle Set Navigation tab clicks
+	document.getElementById("set-tabs").addEventListener("click", (e) => {
+	  const tabBtn = e.target.closest(".set-tab-btn");
+	  if (!tabBtn) return;
+	  const setName = decodeURIComponent(tabBtn.dataset.set);
+	  switchSet(setName);
+	});
+
+	// ==========================================
+	// 7. INITIALIZATION & FILTERS
 	// ==========================================
 	async function init() {
 	  try {
