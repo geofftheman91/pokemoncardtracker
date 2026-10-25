@@ -64,20 +64,32 @@
 	// ==========================================
 	// 1. CONFIGURATION & STATE
 	// ==========================================
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";	
+	// Set API Codes for direct TCGdex fetching
+	const SET_CODES = {
+	  "Journey Together": "sv9",
+	  "Surging Sparks": "sv8",
+	  "Chaos Rising": "sv8pt5",
+	  "Destined Rivals": "sv7",
+	  "Perfect Order": "sv6pt5",
+	  "Pitch Black": "sv6"
+	};
+
 	let allCards = [];
 	let sets = [];
 	let activeSet = "";
 	const CARDS_PER_PAGE = 40;
 	let currentPage = 1;
 
+	// Cache to prevent duplicate price API calls per set
+	const priceCache = {};
+
 	// ==========================================
-	// 2. TOGGLE FUNCTION
+	// 2. TOGGLE CARD (GOOGLE SHEETS SYNC)
 	// ==========================================
 	async function toggleCard(set, rowIndex, currentStatus) {
 	  console.log(`[Toggle] Set: "${set}", Row: ${rowIndex}, Current: ${currentStatus}`);
 
-	  // Locate card in local state using loose number comparison
 	  const target = allCards.find(c => c.set.trim() === set.trim() && Number(c.rowIndex) === Number(rowIndex));
 	  if (!target) {
 		console.error("Target card not found in memory!", { set, rowIndex });
@@ -109,19 +121,87 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		console.log("Sheet update response:", result);
 	  } catch (err) {
 		console.error("Sync failed:", err);
-		target.owned = currentStatus; // Revert if call fails
+		target.owned = currentStatus; // Revert if request fails
 		renderCards();
 	  }
 	}
 
 	// ==========================================
-	// 3. SET SWITCHING & TABS
+	// 3. SET SWITCHING & DIRECT PRICE FETCHING
 	// ==========================================
-	function switchSet(setName) {
+	async function switchSet(setName) {
 	  activeSet = setName;
 	  currentPage = 1;
 	  renderTabs();
-	  renderCards();
+	  renderCards(); // Fast initial render with cards & local images
+
+	  // Fetch prices directly in browser in background
+	  await loadPricesForSet(setName);
+	}
+
+	async function loadPricesForSet(setName) {
+	  const setCode = SET_CODES[setName];
+	  if (!setCode) return;
+
+	  let setPriceMap = priceCache[setName];
+
+	  if (!setPriceMap) {
+		try {
+		  console.log(`[Price API] Fetching pricing for set: ${setName} (${setCode})`);
+		  const res = await fetch(`https://api.tcgdex.net/v2/en/sets/${setCode}`);
+		  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		  const data = await res.json();
+
+		  setPriceMap = {};
+		  if (data && data.cards) {
+			data.cards.forEach(card => {
+			  // Normalize card number: "001" -> "1"
+			  const cleanId = String(card.localId || card.id).replace(/^0+/, "");
+			  setPriceMap[cleanId] = card;
+			});
+		  }
+		  priceCache[setName] = setPriceMap;
+		} catch (err) {
+		  console.warn(`[Price API] Could not fetch pricing for ${setName}:`, err);
+		  return;
+		}
+	  }
+
+	  // Match and apply market prices to cards in active set
+	  let pricesUpdated = false;
+	  allCards.forEach(card => {
+		if (card.set === setName && !card.market_price) {
+		  const rawNum = String(card.cardNumber).split("/")[0].trim();
+		  const cleanNum = rawNum.replace(/^0+/, "") || "0";
+		  const apiCard = setPriceMap[cleanNum];
+
+		  if (apiCard && apiCard.pricing && apiCard.pricing.tcgplayer) {
+			const tcg = apiCard.pricing.tcgplayer;
+			const foil = (card.foil || "").toLowerCase();
+
+			let price = null;
+			if (foil.includes("reverse") && tcg.reverse && tcg.reverse.marketPrice) {
+			  price = tcg.reverse.marketPrice;
+			} else if (foil.includes("holo") && tcg.holo && tcg.holo.marketPrice) {
+			  price = tcg.holo.marketPrice;
+			} else if (tcg.normal && tcg.normal.marketPrice) {
+			  price = tcg.normal.marketPrice;
+			} else {
+			  price = tcg.normal?.marketPrice || tcg.reverse?.marketPrice || tcg.holo?.marketPrice || null;
+			}
+
+			if (price !== null) {
+			  card.market_price = price;
+			  pricesUpdated = true;
+			}
+		  }
+		}
+	  });
+
+	  // Re-render once prices are matched
+	  if (pricesUpdated && activeSet === setName) {
+		renderCards();
+	  }
 	}
 
 	function renderTabs() {
@@ -202,7 +282,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		return;
 	  }
 
-	  // Paginate to prevent DOM and decode slowdowns
+	  // Paginate to keep DOM lightweight
 	  const visibleCards = filtered.slice(0, currentPage * CARDS_PER_PAGE);
 
 	  const cardMarkup = visibleCards.map(card => {
@@ -212,7 +292,9 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		  "bg-slate-800 text-slate-400 border-slate-700";
 
 		const imgSrc = getCardImageSrc(card);
-		const priceDisplay = card.market_price ? `$${Number(card.market_price).toFixed(2)}` : "—";
+		const priceDisplay = (card.market_price !== null && card.market_price !== undefined) 
+		  ? `$${Number(card.market_price).toFixed(2)}` 
+		  : "—";
 
 		return `
 		  <div class="relative bg-slate-900 border ${card.owned ? 'border-amber-400/50' : 'border-slate-800'} rounded-xl p-3 flex flex-col justify-between transition hover:border-slate-700">
@@ -241,11 +323,12 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 			  <h2 class="text-sm font-bold text-white truncate mb-0.5">${card.name}</h2>
 			  <div class="flex items-center justify-between text-[11px] text-slate-500 mb-3">
 				<span>${card.rarity}</span>
-				<span class="text-emerald-400 font-medium">${priceDisplay}</span>
+				<!-- Market Price Badge -->
+				<span class="text-emerald-400 font-medium font-mono">${priceDisplay}</span>
 			  </div>
 			</div>
 
-			<!-- Card Toggle Button with Safe Data Attributes -->
+			<!-- Card Toggle Button -->
 			<button 
 			  type="button"
 			  data-set="${encodeURIComponent(card.set)}"
@@ -276,10 +359,9 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	}
 
 	// ==========================================
-	// 6. EVENT DELEGATION (ROBUST CLICK HANDLING)
+	// 6. EVENT DELEGATION
 	// ==========================================
 	document.getElementById("card-grid").addEventListener("click", (e) => {
-	  // Handle 'Load More' click
 	  const loadMore = e.target.closest("#load-more-btn");
 	  if (loadMore) {
 		currentPage++;
@@ -287,7 +369,6 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		return;
 	  }
 
-	  // Handle 'Toggle Owned' click
 	  const btn = e.target.closest(".toggle-card-btn");
 	  if (!btn) return;
 
@@ -298,7 +379,6 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 	  toggleCard(set, rowIndex, isOwned);
 	});
 
-	// Handle Set Navigation tab clicks
 	document.getElementById("set-tabs").addEventListener("click", (e) => {
 	  const tabBtn = e.target.closest(".set-tab-btn");
 	  if (!tabBtn) return;
@@ -319,6 +399,11 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpe
 		  activeSet = sets[0] || "";
 		  renderTabs();
 		  renderCards();
+
+		  // Fetch initial prices for the default selected set
+		  if (activeSet) {
+			loadPricesForSet(activeSet);
+		  }
 		} else {
 		  document.getElementById("card-grid").innerHTML = 
 			`<div class="col-span-full py-12 text-center text-rose-400 text-sm">Error: ${data.message}</div>`;
