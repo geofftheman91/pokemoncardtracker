@@ -79,22 +79,15 @@
 	// ==========================================
 	const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
 
-	const SET_CODES = {
-	  "Journey Together": "sv9",
-	  "Surging Sparks": "sv8",
-	  "Chaos Rising": "sv8pt5",
-	  "Destined Rivals": "sv7",
-	  "Perfect Order": "sv6pt5",
-	  "Pitch Black": "sv6"
-	};
-
 	let allCards = [];
 	let sets = [];
 	let activeSet = "";
 	const CARDS_PER_PAGE = 40;
 	let currentPage = 1;
 
+	// Cache to prevent duplicate price API calls per set
 	const priceCache = {};
+	let tcgdexSetsList = null;
 
 	// ==========================================
 	// 2. TOGGLE CARD (GOOGLE SHEETS SYNC)
@@ -139,77 +132,75 @@
 	}
 
 	// ==========================================
-	// 3. SET SWITCHING & DIRECT PRICE FETCHING
+	// 3. SET SWITCHING & AUTO-RESOLVING PRICING
 	// ==========================================
 	async function switchSet(setName) {
 	  activeSet = setName;
 	  currentPage = 1;
 	  renderTabs();
-	  renderCards(); // Fast initial render with cards & local images
+	  renderCards(); // Instant fast render with local cards & images
 
-	  // Fetch prices directly in browser
+	  // Fetch prices in background
 	  await loadPricesForSet(setName);
 	}
 
 	async function loadPricesForSet(setName) {
-	  let setPriceMap = priceCache[setName];
-
-	  if (!setPriceMap) {
-		try {
-		  console.log(`[Price API] Looking up prices for: "${setName}"...`);
-
-		  // 1. Direct code lookup
-		  const setCode = SET_CODES[setName];
-		  let data = null;
-
-		  if (setCode) {
-			const res = await fetch(`https://api.tcgdex.net/v2/en/sets/${setCode}`);
-			if (res.ok) {
-			  data = await res.json();
-			}
-		  }
-
-		  // 2. Fallback search by set name if ID fails
-		  if (!data || !data.cards) {
-			console.log(`[Price API] Set code search missed. Searching by name: "${setName}"`);
-			const allSetsRes = await fetch("https://api.tcgdex.net/v2/en/sets");
-			if (allSetsRes.ok) {
-			  const allSets = await allSetsRes.json();
-			  const matchedSet = allSets.find(s => 
-				s.name.toLowerCase().includes(setName.toLowerCase()) || 
-				setName.toLowerCase().includes(s.name.toLowerCase())
-			  );
-
-			  if (matchedSet) {
-				console.log(`[Price API] Matched "${setName}" to ID "${matchedSet.id}"`);
-				const setDetailRes = await fetch(`https://api.tcgdex.net/v2/en/sets/${matchedSet.id}`);
-				data = await setDetailRes.json();
-			  }
-			}
-		  }
-
-		  if (!data || !data.cards) {
-			console.warn(`[Price API] No card data found on TCGdex for: "${setName}"`);
-			return;
-		  }
-
-		  // Index cards by card number
-		  setPriceMap = {};
-		  data.cards.forEach(card => {
-			const cleanId = String(card.localId || card.id).replace(/^0+/, "");
-			setPriceMap[cleanId] = card;
-		  });
-
-		  priceCache[setName] = setPriceMap;
-		  console.log(`[Price API] Cached ${Object.keys(setPriceMap).length} cards for "${setName}"`);
-
-		} catch (err) {
-		  console.error(`[Price API Error] Failed to load prices for "${setName}":`, err);
-		  return;
-		}
+	  if (priceCache[setName]) {
+		applyCachedPrices(setName);
+		return;
 	  }
 
-	  // Match and apply market prices to cards in active set
+	  try {
+		console.log(`[Price API] Resolving set for: "${setName}"...`);
+
+		// Load the full TCGdex set registry once if not already fetched
+		if (!tcgdexSetsList) {
+		  const setsRes = await fetch("https://api.tcgdex.net/v2/en/sets");
+		  if (setsRes.ok) {
+			tcgdexSetsList = await setsRes.json();
+		  } else {
+			tcgdexSetsList = [];
+		  }
+		}
+
+		// Fuzzy match your Google Sheet tab name against official TCGdex set names
+		const cleanName = setName.toLowerCase().replace(/[^a-z0-9]/g, "");
+		const matched = tcgdexSetsList.find(s => {
+		  const sName = s.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+		  return sName === cleanName || sName.includes(cleanName) || cleanName.includes(sName);
+		});
+
+		if (!matched) {
+		  console.warn(`[Price API] No set matched on TCGdex for: "${setName}"`);
+		  return;
+		}
+
+		console.log(`[Price API] Found TCGdex set: "${matched.name}" (ID: ${matched.id})`);
+		const detailRes = await fetch(`https://api.tcgdex.net/v2/en/sets/${matched.id}`);
+		if (!detailRes.ok) throw new Error(`HTTP ${detailRes.status}`);
+
+		const detailData = await detailRes.json();
+		if (!detailData || !detailData.cards) return;
+
+		// Index cards by card number (e.g. "001" or "1")
+		const setPriceMap = {};
+		detailData.cards.forEach(c => {
+		  const cleanId = String(c.localId || c.id).split("/")[0].replace(/^0+/, "");
+		  setPriceMap[cleanId] = c;
+		});
+
+		priceCache[setName] = setPriceMap;
+		applyCachedPrices(setName);
+
+	  } catch (err) {
+		console.warn(`[Price API Error] Could not load prices for "${setName}":`, err);
+	  }
+	}
+
+	function applyCachedPrices(setName) {
+	  const setPriceMap = priceCache[setName];
+	  if (!setPriceMap) return;
+
 	  let pricesUpdated = false;
 	  allCards.forEach(card => {
 		if (card.set === setName && (card.market_price === null || card.market_price === undefined)) {
@@ -217,21 +208,8 @@
 		  const cleanNum = rawNum.replace(/^0+/, "") || "0";
 		  const apiCard = setPriceMap[cleanNum];
 
-		  if (apiCard && apiCard.pricing && apiCard.pricing.tcgplayer) {
-			const tcg = apiCard.pricing.tcgplayer;
-			const foil = (card.foil || "").toLowerCase();
-
-			let price = null;
-			if (foil.includes("reverse") && tcg.reverse?.marketPrice) {
-			  price = tcg.reverse.marketPrice;
-			} else if (foil.includes("holo") && tcg.holo?.marketPrice) {
-			  price = tcg.holo.marketPrice;
-			} else if (tcg.normal?.marketPrice) {
-			  price = tcg.normal.marketPrice;
-			} else {
-			  price = tcg.normal?.marketPrice || tcg.reverse?.marketPrice || tcg.holo?.marketPrice || null;
-			}
-
+		  if (apiCard) {
+			const price = extractPriceFromCard(apiCard, card.foil);
 			if (price !== null) {
 			  card.market_price = price;
 			  pricesUpdated = true;
@@ -243,6 +221,26 @@
 	  if (pricesUpdated && activeSet === setName) {
 		renderCards();
 	  }
+	}
+
+	function extractPriceFromCard(cardObj, foilType) {
+	  if (!cardObj) return null;
+	  const tcg = cardObj.pricing?.tcgplayer || cardObj.variants;
+	  if (!tcg) return null;
+
+	  const foil = (foilType || "").toLowerCase();
+
+	  if (foil.includes("reverse") && tcg.reverse?.marketPrice) {
+		return tcg.reverse.marketPrice;
+	  }
+	  if (foil.includes("holo") && tcg.holo?.marketPrice) {
+		return tcg.holo.marketPrice;
+	  }
+	  if (tcg.normal?.marketPrice) {
+		return tcg.normal.marketPrice;
+	  }
+
+	  return tcg.normal?.marketPrice || tcg.reverse?.marketPrice || tcg.holo?.marketPrice || null;
 	}
 
 	function renderTabs() {
@@ -379,7 +377,7 @@
 			  <h2 class="text-sm font-bold text-white truncate mb-0.5">${card.name}</h2>
 			  <div class="flex items-center justify-between text-[11px] text-slate-500 mb-3">
 				<span>${card.rarity}</span>
-				<!-- Market Price Badge -->
+				<!-- Live Price Badge -->
 				<span class="text-emerald-400 font-medium font-mono">${priceDisplay}</span>
 			  </div>
 			</div>
@@ -456,7 +454,7 @@
 		  renderTabs();
 		  renderCards();
 
-		  // Fetch prices immediately for the default initial set
+		  // Fetch prices for the active set
 		  if (activeSet) {
 			loadPricesForSet(activeSet);
 		  }
