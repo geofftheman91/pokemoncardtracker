@@ -79,14 +79,26 @@
 	// ==========================================
 	const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyhCGRmOFESJPMGkEGpejCzD6rx26dn7QU0lPUhR8Bfw-2S2ZVIkOt6RJQGnCpmrWpDbA/exec";
 
+	// Known TCGdex Set IDs
+	const SET_ID_MAP = {
+	  "Pitch Black": "me05",
+	  "Perfect Order": "me03",
+	  "Chaos Rising": "me04",
+	  "Surging Sparks": "sv08",
+	  "Journey Together": "sv09",
+	  "Destined Rivals": "sv07"
+	};
+
 	let allCards = [];
 	let sets = [];
 	let activeSet = "";
 	const CARDS_PER_PAGE = 40;
 	let currentPage = 1;
 
-	// Cache to prevent duplicate price API calls per set
-	const setPriceCache = {};
+	// Cache stores
+	const detailedCardCache = {};
+	const setCardIndexCache = {};
+	let tcgdexSetsList = null;
 
 	function cleanCardNum(val) {
 	  if (!val) return "";
@@ -108,11 +120,9 @@
 
 	  const nextStatus = !currentStatus;
 
-	  // Optimistic UI update
 	  target.owned = nextStatus;
 	  renderCards();
 
-	  // Sync to Google Sheets
 	  try {
 		const payload = JSON.stringify({
 		  set: set,
@@ -137,7 +147,7 @@
 	}
 
 	// ==========================================
-	// 3. SET SWITCHING & FAST TCGPLAYER PRICING
+	// 3. SET SWITCHING & STEP-BY-STEP PRICING
 	// ==========================================
 	async function switchSet(setName) {
 	  activeSet = setName;
@@ -148,97 +158,163 @@
 	  await loadPricesForSet(setName);
 	}
 
-	async function loadPricesForSet(setName) {
-	  // 1. Check cache
-	  if (setPriceCache[setName]) {
-		applyCachedPrices(setName);
-		return;
+	async function resolveSetId(setName) {
+	  // Direct lookup from known map
+	  if (SET_ID_MAP[setName]) {
+		return SET_ID_MAP[setName];
 	  }
 
-	  try {
-		console.log(`[Price API] Fetching live TCGplayer prices for set: "${setName}"...`);
-
-		// Pokémon TCG API queries all cards in the set in a single fast call
-		const queryUrl = `https://api.pokemontcg.io/v2/cards?q=set.name:"${encodeURIComponent(setName)}"&pageSize=250`;
-		const res = await fetch(queryUrl);
-
-		if (!res.ok) {
-		  console.warn(`[Price API] Pokémon TCG API query returned status: ${res.status}`);
-		  return;
+	  // Step 1: Call https://api.tcgdex.net/v2/en/sets/
+	  if (!tcgdexSetsList) {
+		try {
+		  const res = await fetch("https://api.tcgdex.net/v2/en/sets/");
+		  tcgdexSetsList = res.ok ? await res.json() : [];
+		} catch (e) {
+		  console.warn("[Price API] Could not load global set index:", e);
+		  tcgdexSetsList = [];
 		}
-
-		const json = await res.json();
-		const apiCards = json.data || [];
-
-		if (apiCards.length === 0) {
-		  console.warn(`[Price API] No card data found on Pokémon TCG API for set: "${setName}"`);
-		  return;
-		}
-
-		console.log(`[Price API] Received ${apiCards.length} cards from Pokémon TCG API for "${setName}".`);
-
-		// Index cards by cleaned card number
-		const priceMap = {};
-		apiCards.forEach(c => {
-		  const num = cleanCardNum(c.number);
-		  priceMap[num] = c;
-		});
-
-		setPriceCache[setName] = priceMap;
-		applyCachedPrices(setName);
-
-	  } catch (err) {
-		console.error(`[Price API Error] Failed to load prices for "${setName}":`, err);
 	  }
-	}
 
-	function applyCachedPrices(setName) {
-	  const priceMap = setPriceCache[setName];
-	  if (!priceMap) return;
-
-	  let pricesUpdated = false;
-	  allCards.forEach(c => {
-		if (c.set === setName && (c.market_price === null || c.market_price === undefined)) {
-		  const num = cleanCardNum(c.cardNumber);
-		  const apiCard = priceMap[num];
-
-		  if (apiCard && apiCard.tcgplayer && apiCard.tcgplayer.prices) {
-			const price = extractTCGPlayerPrice(apiCard.tcgplayer.prices, c.foil);
-			if (price !== null) {
-			  c.market_price = price;
-			  pricesUpdated = true;
-			}
-		  }
-		}
+	  // Step 2: Loop through all sets to find matching object
+	  const cleanTarget = setName.toLowerCase().replace(/[^a-z0-9]/g, "");
+	  const matched = tcgdexSetsList.find(s => {
+		const sName = (s.name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+		const sId = (s.id || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+		return sName === cleanTarget || sId === cleanTarget || sName.includes(cleanTarget);
 	  });
 
-	  if (pricesUpdated && activeSet === setName) {
-		renderCards();
+	  return matched ? matched.id : null;
+	}
+
+	async function loadPricesForSet(setName) {
+	  try {
+		console.log(`[Price API] Initiating pipeline for set: "${setName}"...`);
+
+		// Step 2 & 3: Find set ID
+		const resolvedSetId = await resolveSetId(setName);
+		if (!resolvedSetId) {
+		  console.warn(`[Price API] Could not resolve set ID for "${setName}".`);
+		  return;
+		}
+
+		console.log(`[Price API] Set "${setName}" resolved to ID: "${resolvedSetId}"`);
+
+		// Step 3 & 4: Append set ID to /sets/{setID} to get cards array
+		let cardsList = setCardIndexCache[setName];
+		if (!cardsList) {
+		  const detailRes = await fetch(`https://api.tcgdex.net/v2/en/sets/${resolvedSetId}`);
+		  if (!detailRes.ok) {
+			console.warn(`[Price API] /sets/${resolvedSetId} returned HTTP ${detailRes.status}`);
+			return;
+		  }
+		  const detailData = await detailRes.json();
+		  cardsList = detailData.cards || [];
+		  setCardIndexCache[setName] = cardsList;
+		}
+
+		console.log(`[Price API] Set "${resolvedSetId}" returned ${cardsList.length} cards.`);
+
+		// Step 4, 5, 6: Batch fetch /cards/{setID-cardID}
+		const BATCH_SIZE = 10;
+		for (let i = 0; i < cardsList.length; i += BATCH_SIZE) {
+		  if (activeSet !== setName) {
+			console.log(`[Price API] Tab switched; stopping pricing fetch for "${setName}".`);
+			break;
+		  }
+
+		  const chunk = cardsList.slice(i, i + BATCH_SIZE);
+
+		  const fetchPromises = chunk.map(async (stub) => {
+			const cardFullId = stub.id; // e.g. "me03-001" or "sv08-001"
+			if (!cardFullId) return null;
+
+			if (detailedCardCache[cardFullId]) {
+			  return detailedCardCache[cardFullId];
+			}
+
+			try {
+			  // Step 5 & 6: Call https://api.tcgdex.net/v2/en/cards/{cardFullId}
+			  const cardRes = await fetch(`https://api.tcgdex.net/v2/en/cards/${cardFullId}`);
+			  if (cardRes.ok) {
+				const cardObj = await cardRes.json();
+				detailedCardCache[cardFullId] = cardObj;
+				return cardObj;
+			  }
+			} catch (e) {
+			  console.warn(`[Price API] Failed to fetch card ${cardFullId}:`, e);
+			}
+			return null;
+		  });
+
+		  const resolvedCards = await fetchPromises;
+
+		  // Step 7: Loop through response to get pricing & match to Google Sheet cards
+		  let updatedAny = false;
+		  resolvedCards.forEach(cardObj => {
+			if (!cardObj) return;
+
+			const apiCleanNum = cleanCardNum(cardObj.localId || cardObj.id);
+			const apiName = (cardObj.name || "").toLowerCase().trim();
+
+			allCards.forEach(c => {
+			  if (c.set === setName) {
+				const sheetCleanNum = cleanCardNum(c.cardNumber);
+				const sheetName = (c.name || "").toLowerCase().trim();
+
+				const isMatch = (sheetCleanNum && apiCleanNum && sheetCleanNum === apiCleanNum) ||
+								(sheetName && apiName && sheetName === apiName);
+
+				if (isMatch && (c.market_price === null || c.market_price === undefined)) {
+				  const price = extractPriceFromCard(cardObj, c.foil);
+				  if (price !== null) {
+					c.market_price = price;
+					updatedAny = true;
+				  }
+				}
+			  }
+			});
+		  });
+
+		  if (updatedAny && activeSet === setName) {
+			renderCards();
+		  }
+		}
+
+		console.log(`[Price API] Pricing pipeline completed for: "${setName}"`);
+
+	  } catch (err) {
+		console.warn(`[Price API Error] Failed to process cards for "${setName}":`, err);
 	  }
 	}
-//test
-	function extractTCGPlayerPrice(pricesObj, foilType) {
-	  if (!pricesObj) return null;
+
+	// Step 7 helper: parse pricing object
+	function extractPriceFromCard(cardObj, foilType) {
+	  if (!cardObj) return null;
+
+	  const tcg = cardObj.pricing?.tcgplayer || cardObj.variants;
+	  if (!tcg) return null;
+
 	  const foil = (foilType || "").toLowerCase();
 
-	  // Check reverse holo price
-	  if (foil.includes("reverse") && pricesObj.reverseHolofoil) {
-		return pricesObj.reverseHolofoil.market || pricesObj.reverseHolofoil.mid || null;
+	  const getVal = (obj) => {
+		if (!obj) return null;
+		if (typeof obj === 'number') return obj;
+		return obj.marketPrice || obj.market || obj.midPrice || obj.mid || obj.directLowPrice || obj.lowPrice || null;
+	  };
+
+	  if (foil.includes("reverse")) {
+		const rev = getVal(tcg.reverseHolo || tcg.reverse || tcg["reverse-holo"]);
+		if (rev !== null) return rev;
+	  }
+	  if (foil.includes("holo")) {
+		const holo = getVal(tcg.holofoil || tcg.holo);
+		if (holo !== null) return holo;
 	  }
 
-	  // Check holofoil price
-	  if (foil.includes("holo") && pricesObj.holofoil) {
-		return pricesObj.holofoil.market || pricesObj.holofoil.mid || null;
-	  }
+	  const norm = getVal(tcg.normal || tcg.standard);
+	  if (norm !== null) return norm;
 
-	  // Check normal / standard price
-	  if (pricesObj.normal) {
-		return pricesObj.normal.market || pricesObj.normal.mid || null;
-	  }
-
-	  // Fallback: Return any available market price
-	  const anyVariant = pricesObj.normal || pricesObj.holofoil || pricesObj.reverseHolofoil;
-	  return anyVariant ? (anyVariant.market || anyVariant.mid || null) : null;
+	  return getVal(tcg.normal) || getVal(tcg.holofoil) || getVal(tcg.reverseHolo) || getVal(tcg.reverse) || null;
 	}
 
 	function renderTabs() {
@@ -304,7 +380,6 @@
 		return matchesQuery && matchesOwned && matchesFoil;
 	  });
 
-	  // Update Completion Count
 	  const ownedCards = currentSetCards.filter(c => c.owned);
 	  const ownedCount = ownedCards.length;
 	  const totalCount = currentSetCards.length;
@@ -312,7 +387,6 @@
 	  document.getElementById("progress-bar").style.width = `${pct}%`;
 	  document.getElementById("progress-text").textContent = `${ownedCount}/${totalCount} (${pct}%)`;
 
-	  // Update Live Portfolio Values
 	  const ownedValue = ownedCards.reduce((sum, c) => sum + (Number(c.market_price) || 0), 0);
 	  const totalSetValue = currentSetCards.reduce((sum, c) => sum + (Number(c.market_price) || 0), 0);
 
@@ -372,7 +446,6 @@
 			  <h2 class="text-sm font-bold text-white truncate mb-0.5">${card.name}</h2>
 			  <div class="flex items-center justify-between text-[11px] text-slate-500 mb-3">
 				<span>${card.rarity}</span>
-				<!-- Live Price Badge -->
 				<span class="text-emerald-400 font-medium font-mono">${priceDisplay}</span>
 			  </div>
 			</div>
@@ -449,7 +522,6 @@
 		  renderTabs();
 		  renderCards();
 
-		  // Fetch prices for active set
 		  if (activeSet) {
 			loadPricesForSet(activeSet);
 		  }
