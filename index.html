@@ -86,8 +86,13 @@
 	let currentPage = 1;
 
 	// Cache to prevent duplicate price API calls per set
-	const priceCache = {};
-	let tcgdexSetsList = null;
+	const setPriceCache = {};
+
+	function cleanCardNum(val) {
+	  if (!val) return "";
+	  const firstPart = String(val).split("/")[0].trim().toLowerCase();
+	  return firstPart.replace(/^0+/, "") || "0";
+	}
 
 	// ==========================================
 	// 2. TOGGLE CARD (GOOGLE SHEETS SYNC)
@@ -126,92 +131,81 @@
 		console.log("Sheet update response:", result);
 	  } catch (err) {
 		console.error("Sync failed:", err);
-		target.owned = currentStatus; // Revert UI if sync fails
+		target.owned = currentStatus;
 		renderCards();
 	  }
 	}
 
 	// ==========================================
-	// 3. SET SWITCHING & AUTO-RESOLVING PRICING
+	// 3. SET SWITCHING & FAST TCGPLAYER PRICING
 	// ==========================================
 	async function switchSet(setName) {
 	  activeSet = setName;
 	  currentPage = 1;
 	  renderTabs();
-	  renderCards(); // Instant fast render with local cards & images
+	  renderCards();
 
-	  // Fetch prices in background
 	  await loadPricesForSet(setName);
 	}
 
 	async function loadPricesForSet(setName) {
-	  if (priceCache[setName]) {
+	  // 1. Check cache
+	  if (setPriceCache[setName]) {
 		applyCachedPrices(setName);
 		return;
 	  }
 
 	  try {
-		console.log(`[Price API] Resolving set for: "${setName}"...`);
+		console.log(`[Price API] Fetching live TCGplayer prices for set: "${setName}"...`);
 
-		// Load the full TCGdex set registry once if not already fetched
-		if (!tcgdexSetsList) {
-		  const setsRes = await fetch("https://api.tcgdex.net/v2/en/sets");
-		  if (setsRes.ok) {
-			tcgdexSetsList = await setsRes.json();
-		  } else {
-			tcgdexSetsList = [];
-		  }
-		}
+		// Pokémon TCG API queries all cards in the set in a single fast call
+		const queryUrl = `https://api.pokemontcg.io/v2/cards?q=set.name:"${encodeURIComponent(setName)}"&pageSize=250`;
+		const res = await fetch(queryUrl);
 
-		// Fuzzy match your Google Sheet tab name against official TCGdex set names
-		const cleanName = setName.toLowerCase().replace(/[^a-z0-9]/g, "");
-		const matched = tcgdexSetsList.find(s => {
-		  const sName = s.name.toLowerCase().replace(/[^a-z0-9]/g, "");
-		  return sName === cleanName || sName.includes(cleanName) || cleanName.includes(sName);
-		});
-
-		if (!matched) {
-		  console.warn(`[Price API] No set matched on TCGdex for: "${setName}"`);
+		if (!res.ok) {
+		  console.warn(`[Price API] Pokémon TCG API query returned status: ${res.status}`);
 		  return;
 		}
 
-		console.log(`[Price API] Found TCGdex set: "${matched.name}" (ID: ${matched.id})`);
-		const detailRes = await fetch(`https://api.tcgdex.net/v2/en/sets/${matched.id}`);
-		if (!detailRes.ok) throw new Error(`HTTP ${detailRes.status}`);
+		const json = await res.json();
+		const apiCards = json.data || [];
 
-		const detailData = await detailRes.json();
-		if (!detailData || !detailData.cards) return;
+		if (apiCards.length === 0) {
+		  console.warn(`[Price API] No card data found on Pokémon TCG API for set: "${setName}"`);
+		  return;
+		}
 
-		// Index cards by card number (e.g. "001" or "1")
-		const setPriceMap = {};
-		detailData.cards.forEach(c => {
-		  const cleanId = String(c.localId || c.id).split("/")[0].replace(/^0+/, "");
-		  setPriceMap[cleanId] = c;
+		console.log(`[Price API] Received ${apiCards.length} cards from Pokémon TCG API for "${setName}".`);
+
+		// Index cards by cleaned card number
+		const priceMap = {};
+		apiCards.forEach(c => {
+		  const num = cleanCardNum(c.number);
+		  priceMap[num] = c;
 		});
 
-		priceCache[setName] = setPriceMap;
+		setPriceCache[setName] = priceMap;
 		applyCachedPrices(setName);
 
 	  } catch (err) {
-		console.warn(`[Price API Error] Could not load prices for "${setName}":`, err);
+		console.error(`[Price API Error] Failed to load prices for "${setName}":`, err);
 	  }
 	}
 
 	function applyCachedPrices(setName) {
-	  const setPriceMap = priceCache[setName];
-	  if (!setPriceMap) return;
+	  const priceMap = setPriceCache[setName];
+	  if (!priceMap) return;
 
 	  let pricesUpdated = false;
-	  allCards.forEach(card => {
-		if (card.set === setName && (card.market_price === null || card.market_price === undefined)) {
-		  const rawNum = String(card.cardNumber).split("/")[0].trim();
-		  const cleanNum = rawNum.replace(/^0+/, "") || "0";
-		  const apiCard = setPriceMap[cleanNum];
+	  allCards.forEach(c => {
+		if (c.set === setName && (c.market_price === null || c.market_price === undefined)) {
+		  const num = cleanCardNum(c.cardNumber);
+		  const apiCard = priceMap[num];
 
-		  if (apiCard) {
-			const price = extractPriceFromCard(apiCard, card.foil);
+		  if (apiCard && apiCard.tcgplayer && apiCard.tcgplayer.prices) {
+			const price = extractTCGPlayerPrice(apiCard.tcgplayer.prices, c.foil);
 			if (price !== null) {
-			  card.market_price = price;
+			  c.market_price = price;
 			  pricesUpdated = true;
 			}
 		  }
@@ -223,24 +217,28 @@
 	  }
 	}
 
-	function extractPriceFromCard(cardObj, foilType) {
-	  if (!cardObj) return null;
-	  const tcg = cardObj.pricing?.tcgplayer || cardObj.variants;
-	  if (!tcg) return null;
-
+	function extractTCGPlayerPrice(pricesObj, foilType) {
+	  if (!pricesObj) return null;
 	  const foil = (foilType || "").toLowerCase();
 
-	  if (foil.includes("reverse") && tcg.reverse?.marketPrice) {
-		return tcg.reverse.marketPrice;
-	  }
-	  if (foil.includes("holo") && tcg.holo?.marketPrice) {
-		return tcg.holo.marketPrice;
-	  }
-	  if (tcg.normal?.marketPrice) {
-		return tcg.normal.marketPrice;
+	  // Check reverse holo price
+	  if (foil.includes("reverse") && pricesObj.reverseHolofoil) {
+		return pricesObj.reverseHolofoil.market || pricesObj.reverseHolofoil.mid || null;
 	  }
 
-	  return tcg.normal?.marketPrice || tcg.reverse?.marketPrice || tcg.holo?.marketPrice || null;
+	  // Check holofoil price
+	  if (foil.includes("holo") && pricesObj.holofoil) {
+		return pricesObj.holofoil.market || pricesObj.holofoil.mid || null;
+	  }
+
+	  // Check normal / standard price
+	  if (pricesObj.normal) {
+		return pricesObj.normal.market || pricesObj.normal.mid || null;
+	  }
+
+	  // Fallback: Return any available market price
+	  const anyVariant = pricesObj.normal || pricesObj.holofoil || pricesObj.reverseHolofoil;
+	  return anyVariant ? (anyVariant.market || anyVariant.mid || null) : null;
 	}
 
 	function renderTabs() {
@@ -280,9 +278,7 @@
 	  const folder = setFolders[card.set ? card.set.trim() : ""];
 	  if (!folder || !card.cardNumber) return "";
 
-	  const rawNum = String(card.cardNumber).split("/")[0].trim();
-	  const cleanNum = rawNum.replace(/^0+/, "") || "0";
-
+	  const cleanNum = cleanCardNum(card.cardNumber);
 	  const foilNorm = (card.foil || "standard")
 		.trim()
 		.toLowerCase()
@@ -336,7 +332,6 @@
 		return;
 	  }
 
-	  // Paginate to keep DOM lightweight
 	  const visibleCards = filtered.slice(0, currentPage * CARDS_PER_PAGE);
 
 	  const cardMarkup = visibleCards.map(card => {
@@ -454,7 +449,7 @@
 		  renderTabs();
 		  renderCards();
 
-		  // Fetch prices for the active set
+		  // Fetch prices for active set
 		  if (activeSet) {
 			loadPricesForSet(activeSet);
 		  }
